@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Aura Capture",
-  description: "A minimalist voice-capture prototype for founders and researchers.",
+  title: "Clutter",
+  description: "A calming voice-capture prototype that turns mental clutter into held memory.",
 };
 
 export default function RootLayout({

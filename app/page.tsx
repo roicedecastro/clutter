@@ -1,10 +1,80 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, type Variants } from "framer-motion";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type CapturePhase = "idle" | "recording" | "processing" | "output";
+
+type BloomFragment = {
+  color: string;
+  label: string;
+  x: number;
+  y: number;
+};
+
+type EncapsulationItem = BloomFragment & {
+  tone: string;
+};
+
+const waveformBarCount = 28;
+
+const quietWaveform = Array.from({ length: waveformBarCount }, (_, index) => {
+  const centerFalloff = 1 - Math.abs(index - (waveformBarCount - 1) / 2) / (waveformBarCount / 2);
+
+  return 0.08 + centerFalloff * 0.1;
+});
+
+const fallbackTranscriptWords =
+  "this thought is leaving working memory and becoming something the system can safely hold until I need it again".split(
+    " ",
+  );
+
+const bloomFragments: BloomFragment[] = [
+  { color: "#66d9ff", label: "intent", x: 0, y: -118 },
+  { color: "#b084ff", label: "evidence", x: 112, y: -42 },
+  { color: "#ff7ad9", label: "risk", x: 78, y: 102 },
+  { color: "#7effd4", label: "next", x: -86, y: 96 },
+  { color: "#f7d774", label: "context", x: -120, y: -36 },
+];
+
+const encapsulationItems: EncapsulationItem[] = [
+  { color: "#66d9ff", label: "Core Intent", tone: "blue", x: -150, y: -58 },
+  { color: "#ff7ad9", label: "Actions", tone: "magenta", x: -50, y: 58 },
+  { color: "#b084ff", label: "Strategy", tone: "violet", x: 58, y: -44 },
+  { color: "#7effd4", label: "Memory", tone: "mint", x: 154, y: 54 },
+];
+
+const outputGridVariants: Variants = {
+  hidden: {},
+  show: {
+    transition: {
+      delayChildren: 0.56,
+      staggerChildren: 0.11,
+    },
+  },
+};
+
+const bentoCardVariants: Variants = {
+  hidden: {
+    filter: "saturate(1.35) blur(2px)",
+    opacity: 0,
+    scale: 1.08,
+    y: -52,
+  },
+  show: {
+    filter: "saturate(0.68) blur(0px)",
+    opacity: 1,
+    scale: 1,
+    transition: {
+      damping: 16,
+      mass: 0.8,
+      stiffness: 150,
+      type: "spring",
+    },
+    y: 0,
+  },
+};
 
 const actionItems = [
   "Ship the invite-only founder interview loop before adding model automation.",
@@ -43,6 +113,8 @@ export default function Home() {
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [waveformLevels, setWaveformLevels] = useState(quietWaveform);
+  const [transcriptWords, setTranscriptWords] = useState<string[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [capturedDuration, setCapturedDuration] = useState(0);
   const [capturedAt, setCapturedAt] = useState("");
@@ -54,6 +126,7 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const meterFrameRef = useRef<number | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const transcriptTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordingStartedAtRef = useRef<number | null>(null);
 
@@ -78,9 +151,17 @@ export default function Home() {
     const context = audioContextRef.current;
     audioContextRef.current = null;
     setAudioLevel(0);
+    setWaveformLevels(quietWaveform);
 
     if (context && context.state !== "closed") {
       void context.close();
+    }
+  }, []);
+
+  const stopTranscriptStream = useCallback(() => {
+    if (transcriptTimerRef.current) {
+      clearInterval(transcriptTimerRef.current);
+      transcriptTimerRef.current = null;
     }
   }, []);
 
@@ -105,8 +186,24 @@ export default function Home() {
     processingTimerRef.current = setTimeout(() => {
       setPhase("output");
       processingTimerRef.current = null;
-    }, 3000);
+    }, 3600);
   }, [clearProcessingTimer]);
+
+  const startTranscriptStream = useCallback(() => {
+    stopTranscriptStream();
+    setTranscriptWords([]);
+
+    let cursor = 0;
+
+    transcriptTimerRef.current = setInterval(() => {
+      setTranscriptWords((currentWords) => {
+        const nextWord = fallbackTranscriptWords[cursor % fallbackTranscriptWords.length];
+
+        cursor += 1;
+        return [...currentWords, nextWord].slice(-34);
+      });
+    }, 210);
+  }, [stopTranscriptStream]);
 
   const startMeter = useCallback(
     (stream: MediaStream) => {
@@ -135,6 +232,14 @@ export default function Home() {
           frequencyData.reduce((total, value) => total + value, 0) / frequencyData.length;
 
         setAudioLevel(Math.min(1, average / 150));
+        setWaveformLevels(
+          Array.from({ length: waveformBarCount }, (_, index) => {
+            const sampleIndex = Math.floor((index / waveformBarCount) * frequencyData.length);
+            const normalized = frequencyData[sampleIndex] / 255;
+
+            return Math.max(0.08, Math.min(1, normalized * 1.35));
+          }),
+        );
         meterFrameRef.current = requestAnimationFrame(tick);
       };
 
@@ -184,6 +289,7 @@ export default function Home() {
         }).format(new Date()),
       );
       setAudioBlob(null);
+      setTranscriptWords([]);
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -195,6 +301,7 @@ export default function Home() {
         setError("The recording session was interrupted. Please try again.");
         stopElapsedTimer();
         stopMeter();
+        stopTranscriptStream();
         stopStreamTracks();
         setPhase("idle");
       };
@@ -219,6 +326,7 @@ export default function Home() {
       recorder.start(250);
       setPhase("recording");
       startMeter(stream);
+      startTranscriptStream();
 
       elapsedTimerRef.current = setInterval(() => {
         const startedAt = recordingStartedAtRef.current;
@@ -229,6 +337,7 @@ export default function Home() {
     } catch (captureError) {
       stopElapsedTimer();
       stopMeter();
+      stopTranscriptStream();
       stopStreamTracks();
       setPhase("idle");
       setError(
@@ -241,8 +350,10 @@ export default function Home() {
     beginProcessing,
     clearProcessingTimer,
     startMeter,
+    startTranscriptStream,
     stopElapsedTimer,
     stopMeter,
+    stopTranscriptStream,
     stopStreamTracks,
   ]);
 
@@ -254,6 +365,7 @@ export default function Home() {
     setPhase("processing");
     stopElapsedTimer();
     stopMeter();
+    stopTranscriptStream();
 
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
@@ -263,12 +375,13 @@ export default function Home() {
 
     stopStreamTracks();
     beginProcessing();
-  }, [beginProcessing, phase, stopElapsedTimer, stopMeter, stopStreamTracks]);
+  }, [beginProcessing, phase, stopElapsedTimer, stopMeter, stopStreamTracks, stopTranscriptStream]);
 
   const reset = useCallback(() => {
     clearProcessingTimer();
     stopElapsedTimer();
     stopMeter();
+    stopTranscriptStream();
     stopStreamTracks();
 
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
@@ -283,8 +396,9 @@ export default function Home() {
     setCapturedAt("");
     setElapsedSeconds(0);
     setError("");
+    setTranscriptWords([]);
     setPhase("idle");
-  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks]);
+  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks, stopTranscriptStream]);
 
   useEffect(() => {
     if (!audioBlob) {
@@ -305,9 +419,10 @@ export default function Home() {
       clearProcessingTimer();
       stopElapsedTimer();
       stopMeter();
+      stopTranscriptStream();
       stopStreamTracks();
     };
-  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks]);
+  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks, stopTranscriptStream]);
 
   return (
     <main className="relative flex min-h-screen overflow-hidden bg-black px-5 py-8 text-white sm:px-8 lg:px-12">
@@ -324,6 +439,8 @@ export default function Home() {
             isRecording={phase === "recording"}
             onPress={phase === "recording" ? stopRecording : startRecording}
             recordButtonLabel={recordButtonLabel}
+            transcriptWords={transcriptWords}
+            waveformLevels={waveformLevels}
           />
         ) : null}
 
@@ -350,6 +467,8 @@ function IntakePhase({
   isRecording,
   onPress,
   recordButtonLabel,
+  transcriptWords,
+  waveformLevels,
 }: {
   audioLevel: number;
   elapsedSeconds: number;
@@ -357,9 +476,9 @@ function IntakePhase({
   isRecording: boolean;
   onPress: () => void;
   recordButtonLabel: string;
+  transcriptWords: string[];
+  waveformLevels: number[];
 }) {
-  const recordingScale = 1 + audioLevel * 0.52;
-
   return (
     <motion.section
       animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -368,88 +487,38 @@ function IntakePhase({
       initial={{ opacity: 0, scale: 0.98, y: 18 }}
       transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
     >
-      <motion.button
-        aria-label={recordButtonLabel}
-        animate={
-          isRecording
-            ? {
-                borderRadius: ["48% 52% 45% 55%", "56% 44% 52% 48%", "46% 54% 58% 42%"],
-                scale: recordingScale,
-              }
-            : {
-                borderRadius: ["48% 52% 45% 55%", "42% 58% 54% 46%", "58% 42% 48% 52%"],
-                scale: [1, 1.055, 0.985, 1.025],
-              }
-        }
-        className="group relative h-44 w-44 cursor-pointer overflow-hidden border border-white/10 bg-[#111111] shadow-[0_0_90px_rgba(255,255,255,0.12)] outline-none transition hover:border-white/25 focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:h-56 sm:w-56"
-        onClick={onPress}
-        transition={
-          isRecording
-            ? {
-                borderRadius: {
-                  duration: 1.1,
-                  ease: "easeInOut",
-                  repeat: Infinity,
-                  repeatType: "mirror",
-                },
-                scale: {
-                  damping: 16,
-                  mass: 0.5,
-                  stiffness: 420,
-                  type: "spring",
-                },
-              }
-            : {
-                duration: 7,
-                ease: "easeInOut",
-                repeat: Infinity,
-                repeatType: "mirror",
-              }
-        }
-        type="button"
-        whileHover={{ filter: "brightness(1.16)", y: -3 }}
-        whileTap={{ scale: isRecording ? recordingScale * 0.94 : 0.94 }}
-      >
-        <motion.div
-          animate={{
-            opacity: isRecording ? [0.65, 1, 0.72] : [0.54, 0.88, 0.62],
-            rotate: isRecording ? [0, 28, -18, 0] : [0, 10, -8, 0],
-            scale: isRecording ? [1, 1.18 + audioLevel * 0.22, 0.92] : [1, 1.08, 0.96],
-          }}
-          className="absolute inset-0 bg-[conic-gradient(from_90deg_at_50%_50%,#000000,#222222,#888888,#111111,#000000,#444444,#000000)]"
-          transition={{ duration: isRecording ? 1.05 : 8, ease: "easeInOut", repeat: Infinity }}
-        />
-        <motion.div
-          animate={{
-            opacity: isRecording ? [0.42, 0.82, 0.32] : [0.38, 0.72, 0.48],
-            x: isRecording ? [-10, 12, -4] : [-6, 8, -3],
-            y: isRecording ? [8, -12, 4] : [5, -8, 2],
-          }}
-          className="absolute inset-0 bg-[radial-gradient(circle_at_32%_28%,rgba(255,255,255,0.58),transparent_21%),radial-gradient(circle_at_68%_70%,rgba(136,136,136,0.45),transparent_26%),radial-gradient(circle_at_45%_55%,#111111,transparent_58%)] mix-blend-screen"
-          transition={{ duration: isRecording ? 0.8 : 6.4, ease: "easeInOut", repeat: Infinity }}
-        />
-        <div className="absolute inset-[1px] rounded-[inherit] border border-white/10 bg-black/20 shadow-[inset_0_0_44px_rgba(0,0,0,0.72)]" />
+      <GlassSphere audioLevel={audioLevel} isRecording={isRecording} />
+
+      <div className="mt-9 flex min-h-20 flex-col items-center gap-3 text-center">
         {isRecording ? (
           <motion.div
-            animate={{ opacity: [0.45, 0], scale: [1, 1.42 + audioLevel * 0.38] }}
-            className="absolute inset-[-18px] rounded-[inherit] border border-white/30"
-            transition={{ duration: 0.82, ease: "easeOut", repeat: Infinity }}
-          />
+            animate={{ opacity: 1, y: 0 }}
+            className="flex w-[min(36rem,calc(100vw-2.5rem))] flex-col items-center gap-5"
+            initial={{ opacity: 0, y: 14 }}
+            transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <WaveformVisualizer levels={waveformLevels} />
+            <LiveTranscript words={transcriptWords} />
+          </motion.div>
         ) : null}
-        <div className="absolute inset-0 rounded-[inherit] bg-[linear-gradient(135deg,rgba(255,255,255,0.18),transparent_28%,rgba(255,255,255,0.06)_62%,transparent)] opacity-70 transition group-hover:opacity-100" />
-      </motion.button>
 
-      <div className="mt-8 flex min-h-20 flex-col items-center gap-3 text-center">
         <motion.p
-          animate={{ opacity: isRecording ? 1 : [0.72, 1, 0.72] }}
-          className="text-[0.68rem] font-semibold uppercase tracking-[0.48em] text-white"
+          animate={{ opacity: isRecording ? 0.64 : [0.64, 1, 0.64] }}
+          className="text-[0.64rem] font-semibold uppercase tracking-[0.5em] text-[#888888]"
           transition={{ duration: 2.8, ease: "easeInOut", repeat: isRecording ? 0 : Infinity }}
         >
-          {isRecording ? "Tap to Lock In" : "Tap to Record"}
+          {isRecording ? `Live Signal ${formatElapsed(elapsedSeconds)}` : "No decisions yet"}
         </motion.p>
-        <p className="font-mono text-xs tracking-[0.28em] text-[#888888]">
-          {isRecording ? `LIVE SIGNAL ${formatElapsed(elapsedSeconds)}` : "VOICE INTO STRUCTURE"}
-        </p>
+        <motion.button
+          aria-label={recordButtonLabel}
+          className="rounded-full border border-white/12 bg-white px-5 py-3 text-[0.62rem] font-black uppercase tracking-[0.34em] text-black shadow-[0_0_44px_rgba(255,255,255,0.12)] transition hover:border-white hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+          onClick={onPress}
+          type="button"
+          whileHover={{ y: -2 }}
+          whileTap={{ scale: 0.96 }}
+        >
+          {isRecording ? "Seal Thought" : "Speak Thought"}
+        </motion.button>
         {error ? (
           <motion.p
             animate={{ opacity: 1, y: 0 }}
@@ -464,6 +533,115 @@ function IntakePhase({
   );
 }
 
+function GlassSphere({
+  audioLevel,
+  isRecording,
+}: {
+  audioLevel: number;
+  isRecording: boolean;
+}) {
+  return (
+    <div className="relative flex h-52 w-52 items-center justify-center sm:h-64 sm:w-64">
+      <motion.div
+        animate={
+          isRecording
+            ? {
+                borderRadius: ["48% 52% 45% 55%", "56% 44% 52% 48%", "46% 54% 58% 42%"],
+                scale: 1 + audioLevel * 0.32,
+              }
+            : {
+                borderRadius: ["50% 50% 50% 50%", "47% 53% 51% 49%", "52% 48% 47% 53%"],
+                scale: [1, 1.026, 0.994, 1.012],
+              }
+        }
+        className="relative h-44 w-44 overflow-hidden border border-white/10 bg-[#0b0b0b] shadow-[0_0_110px_rgba(255,255,255,0.11),inset_0_0_80px_rgba(255,255,255,0.04)] sm:h-56 sm:w-56"
+        transition={
+          isRecording
+            ? {
+                borderRadius: { duration: 1.2, ease: "easeInOut", repeat: Infinity },
+                scale: { damping: 16, mass: 0.5, stiffness: 360, type: "spring" },
+              }
+            : { duration: 6, ease: "easeInOut", repeat: Infinity, repeatType: "mirror" }
+        }
+      >
+        <motion.div
+          animate={{
+            opacity: isRecording ? [0.68, 1, 0.74] : [0.42, 0.7, 0.46],
+            rotate: isRecording ? [0, 18, -12, 0] : [0, 8, -6, 0],
+            scale: isRecording ? [1, 1.14 + audioLevel * 0.2, 0.96] : [1, 1.05, 0.98],
+          }}
+          className="absolute inset-0 bg-[conic-gradient(from_90deg_at_50%_50%,#000000,#202020,#7d7d7d,#111111,#000000,#4a4a4a,#000000)]"
+          transition={{ duration: isRecording ? 1.1 : 8, ease: "easeInOut", repeat: Infinity }}
+        />
+        <motion.div
+          animate={{
+            opacity: isRecording ? [0.48, 0.82, 0.36] : [0.34, 0.62, 0.38],
+            x: isRecording ? [-8, 10, -4] : [-5, 6, -2],
+            y: isRecording ? [6, -10, 3] : [4, -6, 2],
+          }}
+          className="absolute inset-0 bg-[radial-gradient(circle_at_32%_28%,rgba(255,255,255,0.58),transparent_21%),radial-gradient(circle_at_70%_72%,rgba(125,125,125,0.48),transparent_25%),radial-gradient(circle_at_45%_55%,#0b0b0b,transparent_58%)] mix-blend-screen"
+          transition={{ duration: isRecording ? 0.85 : 6.2, ease: "easeInOut", repeat: Infinity }}
+        />
+        <div className="absolute inset-[1px] rounded-[inherit] border border-white/10 bg-black/20 shadow-[inset_0_0_48px_rgba(0,0,0,0.76)]" />
+        <div className="absolute inset-0 rounded-[inherit] bg-[linear-gradient(135deg,rgba(255,255,255,0.18),transparent_28%,rgba(255,255,255,0.05)_62%,transparent)] opacity-70" />
+      </motion.div>
+
+      {isRecording ? (
+        <motion.div
+          animate={{ opacity: [0.32, 0], scale: [1, 1.46 + audioLevel * 0.24] }}
+          className="absolute h-48 w-48 rounded-full border border-white/25 sm:h-60 sm:w-60"
+          transition={{ duration: 0.9, ease: "easeOut", repeat: Infinity }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function WaveformVisualizer({ levels }: { levels: number[] }) {
+  return (
+    <div
+      aria-label="Reactive voice waveform"
+      className="flex h-20 w-full items-center justify-center gap-1.5 rounded-full border border-white/10 bg-white/[0.035] px-5 shadow-[inset_0_0_48px_rgba(255,255,255,0.025)]"
+      role="img"
+    >
+      {levels.map((level, index) => (
+        <motion.span
+          animate={{
+            height: 8 + level * 56,
+            opacity: 0.28 + level * 0.58,
+          }}
+          className="w-1 rounded-full bg-white"
+          key={`${index}-${waveformBarCount}`}
+          transition={{ damping: 18, mass: 0.7, stiffness: 260, type: "spring" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function LiveTranscript({ words }: { words: string[] }) {
+  const visibleWords = words.length > 0 ? words : ["listening"];
+
+  return (
+    <div className="min-h-24 w-full max-w-xl text-center text-lg leading-8 text-white/78 sm:text-xl sm:leading-9">
+      <AnimatePresence initial={false}>
+        {visibleWords.map((word, index) => (
+          <motion.span
+            animate={{ filter: "blur(0px)", opacity: 1, y: 0 }}
+            className="mr-1.5 inline-block"
+            exit={{ opacity: 0 }}
+            initial={{ filter: "blur(8px)", opacity: 0, y: 8 }}
+            key={`${word}-${index}`}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          >
+            {word}
+          </motion.span>
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function ProcessingPhase() {
   return (
     <motion.section
@@ -473,41 +651,96 @@ function ProcessingPhase() {
       initial={{ opacity: 0 }}
       transition={{ duration: 0.2 }}
     >
-      <div className="relative flex h-64 w-64 items-center justify-center">
+      <div className="relative flex h-[22rem] w-[22rem] items-center justify-center sm:h-[28rem] sm:w-[28rem]">
+        <svg
+          aria-hidden="true"
+          className="absolute inset-0 h-full w-full overflow-visible"
+          viewBox="-180 -180 360 360"
+        >
+          {bloomFragments.map((fragment, index) => (
+            <motion.path
+              animate={{ opacity: 0.58, pathLength: 1 }}
+              d={`M 0 0 Q ${fragment.x * 0.35} ${fragment.y * 0.35} ${fragment.x} ${
+                fragment.y
+              }`}
+              initial={{ opacity: 0.22, pathLength: 0.38 }}
+              key={fragment.label}
+              stroke={fragment.color}
+              strokeLinecap="round"
+              strokeWidth="1.2"
+              transition={{
+                delay: 0.16 + index * 0.1,
+                duration: 0.72,
+                ease: [0.22, 1, 0.36, 1],
+              }}
+            />
+          ))}
+        </svg>
+
         <motion.div
           animate={{
-            background: ["#222222", "#888888", "#ffffff"],
-            borderRadius: ["44% 56% 52% 48%", "50% 50% 50% 50%", "999px"],
+            background: ["#111111", "#1c1c1c", "#080808"],
+            borderRadius: ["44% 56% 52% 48%", "50% 50% 50% 50%", "46% 54% 48% 52%"],
             boxShadow: [
               "0 0 92px rgba(136,136,136,0.16), inset 0 0 64px rgba(0,0,0,0.75)",
-              "0 0 44px rgba(255,255,255,0.32), inset 0 0 18px rgba(255,255,255,0.18)",
-              "0 0 34px rgba(255,255,255,0.9), 0 0 120px rgba(255,255,255,0.16)",
+              "0 0 60px rgba(255,255,255,0.22), inset 0 0 22px rgba(255,255,255,0.18)",
+              "0 0 42px rgba(255,255,255,0.28), 0 0 120px rgba(176,132,255,0.12)",
             ],
             filter: "blur(0px)",
-            height: [214, 54, 10],
-            opacity: [1, 1, 1],
-            rotate: [0, 38, 0],
-            width: [214, 54, 10],
+            height: [190, 132, 86],
+            opacity: [1, 0.84, 0.42],
+            rotate: [0, 16, -6],
+            width: [190, 132, 86],
           }}
           className="absolute border border-white/15"
           initial={{
             background: "#111111",
             filter: "blur(14px)",
-            height: 214,
-            width: 214,
+            height: 190,
+            width: 190,
           }}
           transition={{
-            background: { duration: 0.5, ease: [0.16, 1, 0.3, 1] },
-            borderRadius: { duration: 0.44, ease: [0.16, 1, 0.3, 1] },
-            boxShadow: { duration: 0.58, ease: [0.16, 1, 0.3, 1] },
-            default: { duration: 0.62, ease: [0.16, 1, 0.3, 1] },
+            background: { duration: 1.3, ease: [0.16, 1, 0.3, 1] },
+            borderRadius: { duration: 1.4, ease: [0.16, 1, 0.3, 1] },
+            boxShadow: { duration: 1.4, ease: [0.16, 1, 0.3, 1] },
+            default: { duration: 1.45, ease: [0.16, 1, 0.3, 1] },
             filter: { duration: 0.4 },
           }}
         />
+
+        {bloomFragments.map((fragment, index) => (
+          <motion.div
+            animate={{
+              filter: "blur(0px)",
+              opacity: 1,
+              scale: 1,
+              x: fragment.x,
+              y: fragment.y,
+            }}
+            className="absolute flex h-20 w-20 items-center justify-center rounded-[1.35rem] border bg-black/72 text-[0.54rem] font-black uppercase tracking-[0.26em] text-white shadow-[0_0_48px_rgba(255,255,255,0.07)] backdrop-blur-md"
+            initial={{ filter: "blur(9px)", opacity: 0, scale: 0.42, x: 0, y: 0 }}
+            key={fragment.label}
+            style={{
+              borderColor: `${fragment.color}55`,
+              boxShadow: `0 0 34px ${fragment.color}22, inset 0 0 28px ${fragment.color}14`,
+              color: fragment.color,
+            }}
+            transition={{
+              damping: 17,
+              delay: 0.2 + index * 0.12,
+              mass: 0.8,
+              stiffness: 145,
+              type: "spring",
+            }}
+          >
+            {fragment.label}
+          </motion.div>
+        ))}
+
         <motion.div
-          animate={{ opacity: [0, 0.35, 0], scale: [0.7, 1.9, 2.6] }}
+          animate={{ opacity: [0, 0.32, 0], scale: [0.7, 1.8, 2.4] }}
           className="absolute h-5 w-5 rounded-full border border-white/50"
-          transition={{ delay: 0.42, duration: 1.1, ease: "easeOut", repeat: Infinity }}
+          transition={{ delay: 0.7, duration: 1.3, ease: "easeOut", repeat: Infinity }}
         />
       </div>
       <motion.p
@@ -515,7 +748,7 @@ function ProcessingPhase() {
         className="-mt-6 text-[0.64rem] font-semibold uppercase tracking-[0.52em] text-[#888888]"
         transition={{ duration: 1.4, ease: "easeInOut", repeat: Infinity }}
       >
-        Condensing Signal
+        Revealing Structure
       </motion.p>
     </motion.section>
   );
@@ -560,7 +793,14 @@ function OutputPhase({
         <div className="hidden h-px flex-1 bg-white/10 sm:block" />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+      <EncapsulationStage />
+
+      <motion.div
+        animate="show"
+        className="grid grid-cols-1 gap-3 lg:grid-cols-12"
+        initial="hidden"
+        variants={outputGridVariants}
+      >
         <BentoCard className="lg:col-span-12" label="01 / Core Intent">
           <h1 className="max-w-5xl text-balance text-3xl font-black leading-[0.95] tracking-[-0.055em] text-white sm:text-5xl lg:text-7xl">
             {cards.thesis}
@@ -606,7 +846,7 @@ function OutputPhase({
             </div>
           </div>
         </BentoCard>
-      </div>
+      </motion.div>
 
       <div className="mt-7 flex justify-center">
         <motion.button
@@ -623,6 +863,174 @@ function OutputPhase({
   );
 }
 
+function EncapsulationStage() {
+  return (
+    <div
+      aria-label="Thought fragments settling into memory containers"
+      className="relative mx-auto mb-8 h-56 w-full max-w-3xl overflow-hidden rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_50%_50%,rgba(255,255,255,0.075),transparent_17rem)]"
+      role="img"
+    >
+      <motion.div
+        animate={{ opacity: [0.68, 0.36, 0], scale: [1, 0.76, 0.42] }}
+        className="absolute left-1/2 top-1/2 h-24 w-36 rounded-[1.35rem] border border-white/16 bg-white/[0.055] shadow-[0_0_70px_rgba(255,255,255,0.08)]"
+        initial={{ opacity: 0.68, scale: 1 }}
+        style={{ marginLeft: -72, marginTop: -48 }}
+        transition={{ duration: 1.08, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <div className="absolute inset-3 rounded-[1rem] border border-white/10" />
+      </motion.div>
+
+      {encapsulationItems.map((item, index) => (
+        <motion.div
+          animate={{ scale: [1, 1.022, 1], y: [0, -1.5, 0] }}
+          className="absolute h-16 w-20"
+          key={item.label}
+          style={{
+            left: `calc(50% + ${item.x}px)`,
+            marginLeft: -40,
+            marginTop: -32,
+            top: `calc(50% + ${item.y}px)`,
+          }}
+          transition={{
+            delay: index * 0.2,
+            duration: 4.8 + index * 0.3,
+            ease: "easeInOut",
+            repeat: Infinity,
+          }}
+        >
+          {[0, 1, 2].map((stackIndex) => (
+            <div
+              className="absolute h-10 w-16 rounded-xl border bg-black/78 backdrop-blur-md"
+              key={`${item.label}-${stackIndex}`}
+              style={{
+                borderColor: `${item.color}${stackIndex === 0 ? "55" : "30"}`,
+                bottom: stackIndex * 7,
+                boxShadow: `0 0 22px ${item.color}16`,
+                filter: "saturate(0.58)",
+                left: 8 - stackIndex * 2,
+              }}
+            />
+          ))}
+          <span
+            className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[0.48rem] font-black uppercase tracking-[0.24em] text-white/38"
+            style={{ color: `${item.color}99` }}
+          >
+            {item.tone}
+          </span>
+        </motion.div>
+      ))}
+
+      {encapsulationItems.map((item, index) => (
+        <LandingShard item={item} key={`landing-${item.label}`} onLand={playClosureFeedback} order={index} />
+      ))}
+    </div>
+  );
+}
+
+function LandingShard({
+  item,
+  onLand,
+  order,
+}: {
+  item: EncapsulationItem;
+  onLand: () => void;
+  order: number;
+}) {
+  const hasLandedRef = useRef(false);
+
+  return (
+    <motion.div
+      animate={{
+        filter: "saturate(0.56) blur(0.6px)",
+        opacity: [0, 1, 1],
+        scale: 0.38,
+        x: item.x,
+        y: item.y,
+      }}
+      className="absolute left-1/2 top-1/2 flex h-20 w-32 items-center justify-center rounded-2xl border bg-black/82 text-center text-[0.54rem] font-black uppercase tracking-[0.22em] text-white backdrop-blur-md"
+      initial={{
+        filter: "saturate(1.35) blur(0px)",
+        opacity: 0,
+        scale: 1,
+        x: 0,
+        y: 0,
+      }}
+      onAnimationComplete={() => {
+        if (hasLandedRef.current) {
+          return;
+        }
+
+        hasLandedRef.current = true;
+        onLand();
+      }}
+      style={{
+        borderColor: `${item.color}66`,
+        boxShadow: `0 0 42px ${item.color}2b, inset 0 0 28px ${item.color}14`,
+        color: item.color,
+        marginLeft: -64,
+        marginTop: -40,
+      }}
+      transition={{
+        damping: 16,
+        delay: order * 0.1,
+        mass: 0.8,
+        stiffness: 150,
+        type: "spring",
+      }}
+    >
+      {item.label}
+    </motion.div>
+  );
+}
+
+function playClosureFeedback() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const feedbackNavigator = navigator as Navigator & {
+    vibrate?: (pattern: number | number[]) => boolean;
+  };
+
+  feedbackNavigator.vibrate?.(8);
+
+  try {
+    const AudioContextConstructor =
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+    if (!AudioContextConstructor) {
+      return;
+    }
+
+    const context = new AudioContextConstructor();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const filter = context.createBiquadFilter();
+    const now = context.currentTime;
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(132, now);
+    oscillator.frequency.exponentialRampToValueAtTime(96, now + 0.14);
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(420, now);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.032, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.16);
+    oscillator.onended = () => {
+      void context.close();
+    };
+  } catch {
+    // Browsers may block non-gesture audio; the visual and haptic cues still carry closure.
+  }
+}
+
 function BentoCard({
   children,
   className = "",
@@ -635,16 +1043,18 @@ function BentoCard({
   return (
     <motion.article
       className={`group relative overflow-hidden border border-white/10 bg-[#050505] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] transition duration-300 hover:border-white/20 hover:bg-[#080808] sm:p-7 ${className}`}
-      initial={{ opacity: 0, y: 18 }}
-      transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
-      viewport={{ once: true }}
-      whileInView={{ opacity: 1, y: 0 }}
+      variants={bentoCardVariants}
     >
+      <motion.div
+        animate={{ opacity: [0.22, 0.34, 0.22], scale: [1, 1.018, 1] }}
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.08),transparent_20rem)]"
+        transition={{ duration: 5.4, ease: "easeInOut", repeat: Infinity }}
+      />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/20 opacity-0 transition group-hover:opacity-100" />
-      <p className="mb-5 text-[0.6rem] font-semibold uppercase tracking-[0.42em] text-[#888888]">
+      <p className="relative mb-5 text-[0.6rem] font-semibold uppercase tracking-[0.42em] text-[#888888]">
         {label}
       </p>
-      {children}
+      <div className="relative">{children}</div>
     </motion.article>
   );
 }
