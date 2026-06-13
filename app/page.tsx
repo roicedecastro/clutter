@@ -17,6 +17,31 @@ type EncapsulationItem = BloomFragment & {
   tone: string;
 };
 
+type BrowserSpeechRecognitionResult = {
+  [index: number]: { transcript: string } | undefined;
+};
+
+type BrowserSpeechRecognitionEvent = Event & {
+  results: {
+    length: number;
+    [index: number]: BrowserSpeechRecognitionResult;
+  };
+};
+
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  abort: () => void;
+  start: () => void;
+  stop: () => void;
+};
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
+
 const waveformBarCount = 28;
 
 const quietWaveform = Array.from({ length: waveformBarCount }, (_, index) => {
@@ -108,6 +133,19 @@ function formatElapsed(seconds: number) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
+function speechRecognitionConstructor() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const speechWindow = window as typeof window & {
+    SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  };
+
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
 export default function Home() {
   const [phase, setPhase] = useState<CapturePhase>("idle");
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
@@ -127,6 +165,7 @@ export default function Home() {
   const meterFrameRef = useRef<number | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const transcriptTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordingStartedAtRef = useRef<number | null>(null);
 
@@ -163,6 +202,25 @@ export default function Home() {
       clearInterval(transcriptTimerRef.current);
       transcriptTimerRef.current = null;
     }
+
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+
+    if (recognition) {
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+
+      try {
+        recognition.stop();
+      } catch {
+        try {
+          recognition.abort();
+        } catch {
+          // Some engines throw if recognition is already inactive.
+        }
+      }
+    }
   }, []);
 
   const stopStreamTracks = useCallback(() => {
@@ -189,10 +247,7 @@ export default function Home() {
     }, 3600);
   }, [clearProcessingTimer]);
 
-  const startTranscriptStream = useCallback(() => {
-    stopTranscriptStream();
-    setTranscriptWords([]);
-
+  const startFallbackTranscriptStream = useCallback(() => {
     let cursor = 0;
 
     transcriptTimerRef.current = setInterval(() => {
@@ -203,7 +258,55 @@ export default function Home() {
         return [...currentWords, nextWord].slice(-34);
       });
     }, 210);
-  }, [stopTranscriptStream]);
+  }, []);
+
+  const startTranscriptStream = useCallback(() => {
+    stopTranscriptStream();
+    setTranscriptWords([]);
+
+    const RecognitionConstructor = speechRecognitionConstructor();
+
+    if (!RecognitionConstructor) {
+      startFallbackTranscriptStream();
+      return;
+    }
+
+    try {
+      const recognition = new RecognitionConstructor();
+
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+      recognition.onresult = (event) => {
+        const transcript = Array.from({ length: event.results.length }, (_, index) => {
+          return event.results[index]?.[0]?.transcript ?? "";
+        }).join(" ");
+        const words = transcript.trim().split(/\s+/).filter(Boolean);
+
+        if (words.length > 0) {
+          setTranscriptWords(words.slice(-34));
+        }
+      };
+      recognition.onerror = () => {
+        if (recognitionRef.current !== recognition) {
+          return;
+        }
+
+        recognitionRef.current = null;
+        startFallbackTranscriptStream();
+      };
+      recognition.onend = () => {
+        if (recognitionRef.current === recognition) {
+          recognitionRef.current = null;
+        }
+      };
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      startFallbackTranscriptStream();
+    }
+  }, [startFallbackTranscriptStream, stopTranscriptStream]);
 
   const startMeter = useCallback(
     (stream: MediaStream) => {
