@@ -1,650 +1,1071 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
-type CapturePhase = "idle" | "recording" | "processing" | "output";
+type DemoPhase = "ambient" | "capture" | "bloom" | "encapsulated";
+type StackId = "Physical" | "Emotional" | "Mental" | "Spiritual";
 
-const actionItems = [
-  "Ship the invite-only founder interview loop before adding model automation.",
-  "Turn every raw voice dump into one investor-grade thesis and three asks.",
-  "Instrument retention around reviewed memories, not transcription volume.",
-  "Reserve Friday deep work for pruning the research graph into decisions.",
+type DemoCard = {
+  id: string;
+  label: string;
+  stack: StackId;
+  tags: string[];
+  tint: string;
+  x: number;
+  y: number;
+};
+
+const demoText =
+  "need to follow up with the contractor about the kitchen, also don't forget mom's birthday is next week, and I had that idea about the side project - something with local plants and a subscription box";
+
+const demoWords = demoText.split(" ");
+
+const demoCards: DemoCard[] = [
+  {
+    id: "contractor",
+    label: "Follow up: contractor / kitchen",
+    stack: "Physical",
+    tags: ["errand", "home", "soon"],
+    tint: "var(--sage)",
+    x: -250,
+    y: -96,
+  },
+  {
+    id: "birthday",
+    label: "Mom's birthday - next week",
+    stack: "Emotional",
+    tags: ["personal", "family", "care"],
+    tint: "var(--coral-soft)",
+    x: 234,
+    y: -84,
+  },
+  {
+    id: "plants",
+    label: "Side project idea: local plants",
+    stack: "Mental",
+    tags: ["creative", "idea", "research"],
+    tint: "var(--blue-mist)",
+    x: -212,
+    y: 118,
+  },
+  {
+    id: "subscription",
+    label: "Subscription box angle",
+    stack: "Spiritual",
+    tags: ["meaning", "pattern", "seed"],
+    tint: "var(--blue-dusty)",
+    x: 206,
+    y: 128,
+  },
 ];
 
-const strategyNotes =
-  "The wedge is not another notes app. It is a cognitive lockbox for volatile insight: founders speak while the signal is still emotionally charged, then the system crystallizes intent, evidence, and next moves before context decay begins. The initial audience should be operators who already pay a high tax for fragmented thinking: solo founders, principal researchers, and high-agency PMs running ambiguous bets. The premium moment is when a messy, vulnerable voice memo returns as something sharper than the speaker could have written under pressure.";
+const stackTints: Record<StackId, string> = {
+  Physical: "var(--sage)",
+  Emotional: "var(--coral-soft)",
+  Mental: "var(--blue-dusty)",
+  Spiritual: "var(--blue-mist)",
+};
 
-function preferredAudioMimeType() {
-  if (typeof MediaRecorder === "undefined") {
-    return "";
-  }
+const stackPositions: Record<StackId, { x: number; y: number }> = {
+  Physical: { x: -276, y: 238 },
+  Emotional: { x: -92, y: 238 },
+  Mental: { x: 92, y: 238 },
+  Spiritual: { x: 276, y: 238 },
+};
 
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/ogg;codecs=opus",
-  ];
+const softSpring = {
+  damping: 15,
+  mass: 0.8,
+  stiffness: 130,
+  type: "spring" as const,
+};
 
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
-}
+const landSpring = {
+  damping: 15,
+  mass: 0.8,
+  stiffness: 140,
+  type: "spring" as const,
+};
 
-function formatElapsed(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.max(0, seconds % 60);
-
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
-}
+const sectionVariants: Variants = {
+  hidden: { opacity: 0, y: 28 },
+  show: {
+    opacity: 1,
+    transition: softSpring,
+    y: 0,
+  },
+};
 
 export default function Home() {
-  const [phase, setPhase] = useState<CapturePhase>("idle");
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [capturedDuration, setCapturedDuration] = useState(0);
-  const [capturedAt, setCapturedAt] = useState("");
-  const [error, setError] = useState("");
-
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const meterFrameRef = useRef<number | null>(null);
-  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const recordingStartedAtRef = useRef<number | null>(null);
-
-  const isIntake = phase === "idle" || phase === "recording";
-
-  const displayedElapsed = phase === "recording" ? elapsedSeconds : capturedDuration;
-  const recordButtonLabel = phase === "recording" ? "Stop and process recording" : "Tap to start recording";
-
-  const stopElapsedTimer = useCallback(() => {
-    if (elapsedTimerRef.current) {
-      clearInterval(elapsedTimerRef.current);
-      elapsedTimerRef.current = null;
-    }
-  }, []);
-
-  const stopMeter = useCallback(() => {
-    if (meterFrameRef.current) {
-      cancelAnimationFrame(meterFrameRef.current);
-      meterFrameRef.current = null;
-    }
-
-    const context = audioContextRef.current;
-    audioContextRef.current = null;
-    setAudioLevel(0);
-
-    if (context && context.state !== "closed") {
-      void context.close();
-    }
-  }, []);
-
-  const stopStreamTracks = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => {
-      track.stop();
-    });
-    streamRef.current = null;
-  }, []);
-
-  const clearProcessingTimer = useCallback(() => {
-    if (processingTimerRef.current) {
-      clearTimeout(processingTimerRef.current);
-      processingTimerRef.current = null;
-    }
-  }, []);
-
-  const beginProcessing = useCallback(() => {
-    clearProcessingTimer();
-    setPhase("processing");
-
-    processingTimerRef.current = setTimeout(() => {
-      setPhase("output");
-      processingTimerRef.current = null;
-    }, 3000);
-  }, [clearProcessingTimer]);
-
-  const startMeter = useCallback(
-    (stream: MediaStream) => {
-      const AudioContextConstructor =
-        window.AudioContext ??
-        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-
-      if (!AudioContextConstructor) {
-        return;
-      }
-
-      const context = new AudioContextConstructor();
-      const analyser = context.createAnalyser();
-      const source = context.createMediaStreamSource(stream);
-
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.68;
-      const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-      source.connect(analyser);
-      audioContextRef.current = context;
-
-      const tick = () => {
-        analyser.getByteFrequencyData(frequencyData);
-
-        const average =
-          frequencyData.reduce((total, value) => total + value, 0) / frequencyData.length;
-
-        setAudioLevel(Math.min(1, average / 150));
-        meterFrameRef.current = requestAnimationFrame(tick);
-      };
-
-      tick();
-    },
-    [],
-  );
-
-  const startRecording = useCallback(async () => {
-    setError("");
-    clearProcessingTimer();
-
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setError("Microphone capture is not available in this browser.");
-      return;
-    }
-
-    if (typeof MediaRecorder === "undefined") {
-      setError("MediaRecorder is not supported in this browser.");
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-
-      const mimeType = preferredAudioMimeType();
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-
-      chunksRef.current = [];
-      streamRef.current = stream;
-      recorderRef.current = recorder;
-      recordingStartedAtRef.current = Date.now();
-      setElapsedSeconds(0);
-      setCapturedDuration(0);
-      setCapturedAt(
-        new Intl.DateTimeFormat("en", {
-          hour: "2-digit",
-          minute: "2-digit",
-          month: "short",
-          day: "2-digit",
-        }).format(new Date()),
-      );
-      setAudioBlob(null);
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onerror = () => {
-        setError("The recording session was interrupted. Please try again.");
-        stopElapsedTimer();
-        stopMeter();
-        stopStreamTracks();
-        setPhase("idle");
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        });
-
-        const startedAt = recordingStartedAtRef.current;
-        const duration = startedAt ? Math.max(1, Math.round((Date.now() - startedAt) / 1000)) : 0;
-
-        recorderRef.current = null;
-        recordingStartedAtRef.current = null;
-        chunksRef.current = [];
-        setCapturedDuration(duration);
-        setAudioBlob(blob);
-        stopStreamTracks();
-        beginProcessing();
-      };
-
-      recorder.start(250);
-      setPhase("recording");
-      startMeter(stream);
-
-      elapsedTimerRef.current = setInterval(() => {
-        const startedAt = recordingStartedAtRef.current;
-        if (startedAt) {
-          setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
-        }
-      }, 250);
-    } catch (captureError) {
-      stopElapsedTimer();
-      stopMeter();
-      stopStreamTracks();
-      setPhase("idle");
-      setError(
-        captureError instanceof DOMException && captureError.name === "NotAllowedError"
-          ? "Microphone permission is required to capture a thought."
-          : "Unable to start the microphone. Check input permissions and try again.",
-      );
-    }
-  }, [
-    beginProcessing,
-    clearProcessingTimer,
-    startMeter,
-    stopElapsedTimer,
-    stopMeter,
-    stopStreamTracks,
-  ]);
-
-  const stopRecording = useCallback(() => {
-    if (phase !== "recording") {
-      return;
-    }
-
-    setPhase("processing");
-    stopElapsedTimer();
-    stopMeter();
-
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-      return;
-    }
-
-    stopStreamTracks();
-    beginProcessing();
-  }, [beginProcessing, phase, stopElapsedTimer, stopMeter, stopStreamTracks]);
-
-  const reset = useCallback(() => {
-    clearProcessingTimer();
-    stopElapsedTimer();
-    stopMeter();
-    stopStreamTracks();
-
-    if (recorderRef.current && recorderRef.current.state !== "inactive") {
-      recorderRef.current.stop();
-    }
-
-    recorderRef.current = null;
-    chunksRef.current = [];
-    recordingStartedAtRef.current = null;
-    setAudioBlob(null);
-    setCapturedDuration(0);
-    setCapturedAt("");
-    setElapsedSeconds(0);
-    setError("");
-    setPhase("idle");
-  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks]);
-
-  useEffect(() => {
-    if (!audioBlob) {
-      setAudioUrl(null);
-      return;
-    }
-
-    const nextAudioUrl = URL.createObjectURL(audioBlob);
-    setAudioUrl(nextAudioUrl);
-
-    return () => {
-      URL.revokeObjectURL(nextAudioUrl);
-    };
-  }, [audioBlob]);
-
-  useEffect(() => {
-    return () => {
-      clearProcessingTimer();
-      stopElapsedTimer();
-      stopMeter();
-      stopStreamTracks();
-    };
-  }, [clearProcessingTimer, stopElapsedTimer, stopMeter, stopStreamTracks]);
-
   return (
-    <main className="relative flex min-h-screen overflow-hidden bg-black px-5 py-8 text-white sm:px-8 lg:px-12">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(255,255,255,0.055),transparent_23rem)]" />
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/10" />
-
-      <AnimatePresence mode="wait">
-        {isIntake ? (
-          <IntakePhase
-            key="intake"
-            audioLevel={audioLevel}
-            elapsedSeconds={displayedElapsed}
-            error={error}
-            isRecording={phase === "recording"}
-            onPress={phase === "recording" ? stopRecording : startRecording}
-            recordButtonLabel={recordButtonLabel}
-          />
-        ) : null}
-
-        {phase === "processing" ? <ProcessingPhase key="processing" /> : null}
-
-        {phase === "output" ? (
-          <OutputPhase
-            key="output"
-            audioUrl={audioUrl}
-            capturedAt={capturedAt}
-            duration={capturedDuration}
-            onReset={reset}
-          />
-        ) : null}
-      </AnimatePresence>
+    <main className="min-h-screen overflow-hidden bg-[var(--bg-base)] text-[var(--text-primary)]">
+      <MeshBackdrop />
+      <HeroSection />
+      <ProblemSection />
+      <InteractiveDemoSection />
+      <PillarsSection />
+      <FinalWaitlistSection />
+      <Footer />
     </main>
   );
 }
 
-function IntakePhase({
-  audioLevel,
-  elapsedSeconds,
-  error,
-  isRecording,
-  onPress,
-  recordButtonLabel,
-}: {
-  audioLevel: number;
-  elapsedSeconds: number;
-  error: string;
-  isRecording: boolean;
-  onPress: () => void;
-  recordButtonLabel: string;
-}) {
-  const recordingScale = 1 + audioLevel * 0.52;
+function MeshBackdrop() {
+  const prefersReducedMotion = useReducedMotion();
 
   return (
-    <motion.section
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      className="relative z-10 flex min-h-[calc(100vh-4rem)] w-full flex-col items-center justify-center"
-      exit={{ opacity: 0, scale: 0.96, y: -12, transition: { duration: 0.22 } }}
-      initial={{ opacity: 0, scale: 0.98, y: 18 }}
-      transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <motion.button
-        aria-label={recordButtonLabel}
-        animate={
-          isRecording
-            ? {
-                borderRadius: ["48% 52% 45% 55%", "56% 44% 52% 48%", "46% 54% 58% 42%"],
-                scale: recordingScale,
-              }
-            : {
-                borderRadius: ["48% 52% 45% 55%", "42% 58% 54% 46%", "58% 42% 48% 52%"],
-                scale: [1, 1.055, 0.985, 1.025],
-              }
-        }
-        className="group relative h-44 w-44 cursor-pointer overflow-hidden border border-white/10 bg-[#111111] shadow-[0_0_90px_rgba(255,255,255,0.12)] outline-none transition hover:border-white/25 focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:h-56 sm:w-56"
-        onClick={onPress}
-        transition={
-          isRecording
-            ? {
-                borderRadius: {
-                  duration: 1.1,
-                  ease: "easeInOut",
-                  repeat: Infinity,
-                  repeatType: "mirror",
-                },
-                scale: {
-                  damping: 16,
-                  mass: 0.5,
-                  stiffness: 420,
-                  type: "spring",
-                },
-              }
-            : {
-                duration: 7,
-                ease: "easeInOut",
-                repeat: Infinity,
-                repeatType: "mirror",
-              }
-        }
-        type="button"
-        whileHover={{ filter: "brightness(1.16)", y: -3 }}
-        whileTap={{ scale: isRecording ? recordingScale * 0.94 : 0.94 }}
-      >
+    <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+      {[
+        { color: "rgba(153,167,183,0.13)", x: "12%", y: "6%", size: "34rem" },
+        { color: "rgba(247,203,202,0.12)", x: "72%", y: "14%", size: "30rem" },
+        { color: "rgba(189,215,216,0.14)", x: "50%", y: "70%", size: "38rem" },
+      ].map((blob, index) => (
         <motion.div
-          animate={{
-            opacity: isRecording ? [0.65, 1, 0.72] : [0.54, 0.88, 0.62],
-            rotate: isRecording ? [0, 28, -18, 0] : [0, 10, -8, 0],
-            scale: isRecording ? [1, 1.18 + audioLevel * 0.22, 0.92] : [1, 1.08, 0.96],
+          animate={
+            prefersReducedMotion
+              ? undefined
+              : {
+                  x: index % 2 === 0 ? [0, 34, -18, 0] : [0, -28, 22, 0],
+                  y: index % 2 === 0 ? [0, -24, 18, 0] : [0, 22, -18, 0],
+                }
+          }
+          className="absolute rounded-full blur-3xl"
+          key={blob.color}
+          style={{
+            background: blob.color,
+            height: blob.size,
+            left: blob.x,
+            top: blob.y,
+            width: blob.size,
           }}
-          className="absolute inset-0 bg-[conic-gradient(from_90deg_at_50%_50%,#000000,#222222,#888888,#111111,#000000,#444444,#000000)]"
-          transition={{ duration: isRecording ? 1.05 : 8, ease: "easeInOut", repeat: Infinity }}
+          transition={{ duration: 34 + index * 4, ease: "easeInOut", repeat: Infinity }}
         />
-        <motion.div
-          animate={{
-            opacity: isRecording ? [0.42, 0.82, 0.32] : [0.38, 0.72, 0.48],
-            x: isRecording ? [-10, 12, -4] : [-6, 8, -3],
-            y: isRecording ? [8, -12, 4] : [5, -8, 2],
-          }}
-          className="absolute inset-0 bg-[radial-gradient(circle_at_32%_28%,rgba(255,255,255,0.58),transparent_21%),radial-gradient(circle_at_68%_70%,rgba(136,136,136,0.45),transparent_26%),radial-gradient(circle_at_45%_55%,#111111,transparent_58%)] mix-blend-screen"
-          transition={{ duration: isRecording ? 0.8 : 6.4, ease: "easeInOut", repeat: Infinity }}
-        />
-        <div className="absolute inset-[1px] rounded-[inherit] border border-white/10 bg-black/20 shadow-[inset_0_0_44px_rgba(0,0,0,0.72)]" />
-        {isRecording ? (
-          <motion.div
-            animate={{ opacity: [0.45, 0], scale: [1, 1.42 + audioLevel * 0.38] }}
-            className="absolute inset-[-18px] rounded-[inherit] border border-white/30"
-            transition={{ duration: 0.82, ease: "easeOut", repeat: Infinity }}
-          />
-        ) : null}
-        <div className="absolute inset-0 rounded-[inherit] bg-[linear-gradient(135deg,rgba(255,255,255,0.18),transparent_28%,rgba(255,255,255,0.06)_62%,transparent)] opacity-70 transition group-hover:opacity-100" />
-      </motion.button>
+      ))}
+    </div>
+  );
+}
 
-      <div className="mt-8 flex min-h-20 flex-col items-center gap-3 text-center">
+function HeroSection() {
+  const [isOpen, setIsOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  function submitWaitlist(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!email.trim()) {
+      return;
+    }
+
+    console.log("waitlist signup", email);
+    setSubmitted(true);
+  }
+
+  return (
+    <section className="relative z-10 flex min-h-screen items-center justify-center px-5 py-16">
+      <motion.div
+        animate="show"
+        className="mx-auto flex max-w-5xl flex-col items-center text-center"
+        initial="hidden"
+        variants={{
+          hidden: {},
+          show: { transition: { staggerChildren: 0.1 } },
+        }}
+      >
         <motion.p
-          animate={{ opacity: isRecording ? 1 : [0.72, 1, 0.72] }}
-          className="text-[0.68rem] font-semibold uppercase tracking-[0.48em] text-white"
-          transition={{ duration: 2.8, ease: "easeInOut", repeat: isRecording ? 0 : Infinity }}
+          className="font-serif text-4xl lowercase tracking-[-0.06em] text-[var(--text-primary)] sm:text-5xl"
+          variants={sectionVariants}
         >
-          {isRecording ? "Tap to Lock In" : "Tap to Record"}
+          Clutter
         </motion.p>
-        <p className="font-mono text-xs tracking-[0.28em] text-[#888888]">
-          {isRecording ? `LIVE SIGNAL ${formatElapsed(elapsedSeconds)}` : "VOICE INTO STRUCTURE"}
-        </p>
-        {error ? (
-          <motion.p
-            animate={{ opacity: 1, y: 0 }}
-            className="max-w-xs text-sm leading-6 text-[#888888]"
-            initial={{ opacity: 0, y: 8 }}
-          >
-            {error}
-          </motion.p>
-        ) : null}
-      </div>
-    </motion.section>
-  );
-}
-
-function ProcessingPhase() {
-  return (
-    <motion.section
-      animate={{ opacity: 1 }}
-      className="relative z-10 flex min-h-[calc(100vh-4rem)] w-full flex-col items-center justify-center"
-      exit={{ opacity: 0, filter: "blur(10px)", transition: { duration: 0.22 } }}
-      initial={{ opacity: 0 }}
-      transition={{ duration: 0.2 }}
-    >
-      <div className="relative flex h-64 w-64 items-center justify-center">
-        <motion.div
-          animate={{
-            background: ["#222222", "#888888", "#ffffff"],
-            borderRadius: ["44% 56% 52% 48%", "50% 50% 50% 50%", "999px"],
-            boxShadow: [
-              "0 0 92px rgba(136,136,136,0.16), inset 0 0 64px rgba(0,0,0,0.75)",
-              "0 0 44px rgba(255,255,255,0.32), inset 0 0 18px rgba(255,255,255,0.18)",
-              "0 0 34px rgba(255,255,255,0.9), 0 0 120px rgba(255,255,255,0.16)",
-            ],
-            filter: "blur(0px)",
-            height: [214, 54, 10],
-            opacity: [1, 1, 1],
-            rotate: [0, 38, 0],
-            width: [214, 54, 10],
-          }}
-          className="absolute border border-white/15"
-          initial={{
-            background: "#111111",
-            filter: "blur(14px)",
-            height: 214,
-            width: 214,
-          }}
-          transition={{
-            background: { duration: 0.5, ease: [0.16, 1, 0.3, 1] },
-            borderRadius: { duration: 0.44, ease: [0.16, 1, 0.3, 1] },
-            boxShadow: { duration: 0.58, ease: [0.16, 1, 0.3, 1] },
-            default: { duration: 0.62, ease: [0.16, 1, 0.3, 1] },
-            filter: { duration: 0.4 },
-          }}
-        />
-        <motion.div
-          animate={{ opacity: [0, 0.35, 0], scale: [0.7, 1.9, 2.6] }}
-          className="absolute h-5 w-5 rounded-full border border-white/50"
-          transition={{ delay: 0.42, duration: 1.1, ease: "easeOut", repeat: Infinity }}
-        />
-      </div>
-      <motion.p
-        animate={{ opacity: [0.36, 1, 0.36] }}
-        className="-mt-6 text-[0.64rem] font-semibold uppercase tracking-[0.52em] text-[#888888]"
-        transition={{ duration: 1.4, ease: "easeInOut", repeat: Infinity }}
-      >
-        Condensing Signal
-      </motion.p>
-    </motion.section>
-  );
-}
-
-function OutputPhase({
-  audioUrl,
-  capturedAt,
-  duration,
-  onReset,
-}: {
-  audioUrl: string | null;
-  capturedAt: string;
-  duration: number;
-  onReset: () => void;
-}) {
-  const cards = useMemo(
-    () => ({
-      context:
-        "Voice memo crystallized into operating memory. No API call has been made yet; this is the intended structural output layer.",
-      thesis:
-        "Build the founder's second brain around decisive memory: capture raw conviction at the speed of speech, then return it as strategy before doubt edits it away.",
-    }),
-    [],
-  );
-
-  return (
-    <motion.section
-      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-      className="relative z-10 mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-6xl flex-col justify-center"
-      exit={{ opacity: 0, y: 18, filter: "blur(12px)", transition: { duration: 0.18 } }}
-      initial={{ opacity: 0, y: 28, filter: "blur(12px)" }}
-      transition={{ duration: 0.48, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <div className="mb-5 flex items-center justify-between gap-4">
-        <div>
-          <p className="text-[0.62rem] font-semibold uppercase tracking-[0.5em] text-[#888888]">
-            Brain Dump / Structured Memory
-          </p>
-          <p className="mt-2 max-w-xl text-sm leading-6 text-[#888888]">{cards.context}</p>
-        </div>
-        <div className="hidden h-px flex-1 bg-white/10 sm:block" />
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-        <BentoCard className="lg:col-span-12" label="01 / Core Intent">
-          <h1 className="max-w-5xl text-balance text-3xl font-black leading-[0.95] tracking-[-0.055em] text-white sm:text-5xl lg:text-7xl">
-            {cards.thesis}
-          </h1>
-        </BentoCard>
-
-        <BentoCard className="lg:col-span-5" label="02 / Execution">
-          <div className="space-y-4">
-            {actionItems.map((item) => (
-              <div className="flex items-start gap-3" key={item}>
-                <span className="mt-1.5 h-3.5 w-3.5 shrink-0 border border-white/35 bg-black shadow-[inset_0_0_0_2px_#000000]" />
-                <p className="text-sm leading-6 text-white/90">{item}</p>
-              </div>
-            ))}
-          </div>
-        </BentoCard>
-
-        <BentoCard className="lg:col-span-7" label="03 / Context & Deep Strategy">
-          <p className="text-base leading-8 text-white/80 sm:text-lg">{strategyNotes}</p>
-        </BentoCard>
-
-        <BentoCard className="lg:col-span-12" label="04 / Metadata & Audio">
-          <div className="grid gap-5 lg:grid-cols-[0.7fr_1.3fr] lg:items-center">
-            <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.28em] text-[#888888]">
-              <span>{capturedAt || "Just now"}</span>
-              <span className="h-1 w-1 rounded-full bg-white/35" />
-              <span>{formatElapsed(duration)}</span>
-              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-white/45">
-                [Core Memory]
-              </span>
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-[#111111]/70 p-2">
-              {audioUrl ? (
-                <audio className="h-11 w-full invert" controls preload="metadata" src={audioUrl}>
-                  Your browser does not support the audio element.
-                </audio>
-              ) : (
-                <p className="px-3 py-2 text-sm text-[#888888]">
-                  Audio preview is preparing from the captured blob.
-                </p>
-              )}
-            </div>
-          </div>
-        </BentoCard>
-      </div>
-
-      <div className="mt-7 flex justify-center">
-        <motion.button
-          className="border border-white/10 px-4 py-3 text-[0.62rem] font-semibold uppercase tracking-[0.38em] text-[#888888] transition hover:border-white/30 hover:bg-white hover:text-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-          onClick={onReset}
-          type="button"
-          whileHover={{ y: -2 }}
-          whileTap={{ scale: 0.96 }}
+        <motion.h1
+          className="mt-8 max-w-4xl text-balance font-serif text-5xl leading-[0.96] tracking-[-0.06em] text-[var(--text-primary)] sm:text-7xl lg:text-8xl"
+          variants={sectionVariants}
         >
-          Reset / Dump Another Thought
-        </motion.button>
-      </div>
-    </motion.section>
+          Your mind doesn't need another to-do list. It needs somewhere to land.
+        </motion.h1>
+        <motion.p
+          className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-[var(--text-secondary)] sm:text-xl"
+          variants={sectionVariants}
+        >
+          Say what's on your mind without deciding where it belongs. Clutter gathers the thought,
+          finds the shape, and holds it until you need it.
+        </motion.p>
+
+        <motion.div
+          className="mt-10 flex w-full max-w-xl flex-col items-center justify-center gap-3 sm:flex-row"
+          variants={sectionVariants}
+        >
+          <AnimatePresence mode="wait">
+            {!isOpen ? (
+              <motion.button
+                className="rounded-full bg-[var(--blue-dusty)] px-7 py-4 text-sm font-semibold lowercase tracking-[0.08em] text-[var(--bg-elevated)] shadow-[0_18px_48px_rgba(120,134,158,0.22)]"
+                key="open"
+                onClick={() => setIsOpen(true)}
+                type="button"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                join the waitlist
+              </motion.button>
+            ) : submitted ? (
+              <motion.div
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                className="rounded-full border border-[rgba(143,168,160,0.35)] bg-[rgba(255,255,255,0.55)] px-7 py-4 text-sm lowercase text-[var(--text-secondary)] shadow-[0_18px_48px_rgba(120,134,158,0.14)] backdrop-blur-xl"
+                initial={{ opacity: 0, scale: 0.92, y: 10 }}
+                key="success"
+                transition={landSpring}
+              >
+                tucked away. we'll send a note soon.
+              </motion.div>
+            ) : (
+              <motion.form
+                animate={{ opacity: 1, width: "100%" }}
+                className="glass-shell flex rounded-full p-1"
+                initial={{ opacity: 0, width: "72%" }}
+                key="form"
+                onSubmit={submitWaitlist}
+                transition={softSpring}
+              >
+                <input
+                  className="min-w-0 flex-1 bg-transparent px-5 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="your email"
+                  type="email"
+                  value={email}
+                />
+                <button
+                  className="rounded-full bg-[var(--blue-dusty)] px-5 py-3 text-sm font-semibold lowercase text-[var(--bg-elevated)]"
+                  type="submit"
+                >
+                  settle in
+                </button>
+              </motion.form>
+            )}
+          </AnimatePresence>
+
+          <button
+            className="rounded-full border border-[rgba(153,167,183,0.32)] px-7 py-4 text-sm font-semibold lowercase tracking-[0.08em] text-[var(--blue-slate)] transition hover:bg-[rgba(255,255,255,0.32)]"
+            onClick={() => document.getElementById("demo")?.scrollIntoView({ behavior: "smooth" })}
+            type="button"
+          >
+            see how it works
+          </button>
+        </motion.div>
+      </motion.div>
+    </section>
   );
 }
 
-function BentoCard({
-  children,
-  className = "",
-  label,
-}: {
-  children: ReactNode;
-  className?: string;
-  label: string;
-}) {
+function ProblemSection() {
+  const statements = [
+    {
+      bg: "bg-[var(--bg-base)]",
+      copy: "Your best ideas show up at the worst times.",
+      icon: "spark",
+    },
+    {
+      bg: "bg-[var(--blue-mist)]",
+      copy: "Every app makes you decide where something goes before you've even finished the thought.",
+      icon: "path",
+    },
+    {
+      bg: "bg-[var(--bg-deep)]",
+      copy: "Clutter just listens. The organizing happens after.",
+      icon: "bowl",
+    },
+  ];
+
   return (
-    <motion.article
-      className={`group relative overflow-hidden border border-white/10 bg-[#050505] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] transition duration-300 hover:border-white/20 hover:bg-[#080808] sm:p-7 ${className}`}
-      initial={{ opacity: 0, y: 18 }}
-      transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
-      viewport={{ once: true }}
+    <section className="relative z-10 snap-y snap-proximity">
+      {statements.map((statement) => (
+        <motion.div
+          className={`${statement.bg} flex min-h-[76vh] snap-start items-center justify-center px-5 py-20`}
+          initial="hidden"
+          key={statement.copy}
+          variants={sectionVariants}
+          viewport={{ amount: 0.45, once: true }}
+          whileInView="show"
+        >
+          <div className="flex max-w-4xl flex-col items-center text-center">
+            <ProblemIcon name={statement.icon} />
+            <p className="mt-8 text-balance font-serif text-4xl leading-tight tracking-[-0.045em] text-[var(--text-primary)] sm:text-6xl">
+              {statement.copy}
+            </p>
+          </div>
+        </motion.div>
+      ))}
+    </section>
+  );
+}
+
+function ProblemIcon({ name }: { name: string }) {
+  return (
+    <svg className="h-16 w-16 text-[var(--sage-deep)]" fill="none" viewBox="0 0 80 80">
+      {name === "spark" ? (
+        <>
+          <path d="M40 12v18M40 50v18M12 40h18M50 40h18" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+          <circle cx="40" cy="40" r="8" stroke="currentColor" strokeWidth="2" />
+        </>
+      ) : null}
+      {name === "path" ? (
+        <path
+          d="M14 50c14-24 30 16 52-12M21 24h20M46 56h14"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeWidth="2"
+        />
+      ) : null}
+      {name === "bowl" ? (
+        <>
+          <path d="M18 36h44c-2 16-10 25-22 25S20 52 18 36Z" stroke="currentColor" strokeWidth="2" />
+          <path d="M28 28c5-7 19-7 24 0" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+function InteractiveDemoSection() {
+  return (
+    <section
+      className="relative z-10 bg-[var(--bg-base)] px-4 py-24 sm:px-6 lg:px-8"
+      id="demo"
+    >
+      <motion.div
+        className="mx-auto mb-10 max-w-3xl text-center"
+        initial="hidden"
+        variants={sectionVariants}
+        viewport={{ amount: 0.35, once: true }}
+        whileInView="show"
+      >
+        <p className="text-sm font-semibold lowercase tracking-[0.18em] text-[var(--blue-slate)]">
+          interactive demo
+        </p>
+        <h2 className="mt-4 font-serif text-4xl leading-tight tracking-[-0.05em] sm:text-6xl">
+          watch a thought find its home
+        </h2>
+        <p className="mt-5 text-lg leading-8 text-[var(--text-secondary)]">
+          No microphone, no account. Click through the core flow and feel the moment where active
+          clutter becomes held memory.
+        </p>
+      </motion.div>
+      <ClutterDemo />
+    </section>
+  );
+}
+
+function ClutterDemo() {
+  const prefersReducedMotion = useReducedMotion();
+  const [phase, setPhase] = useState<DemoPhase>("ambient");
+  const [visibleWords, setVisibleWords] = useState(0);
+  const [selectedCard, setSelectedCard] = useState<DemoCard | null>(null);
+  const [note, setNote] = useState("");
+
+  const visibleText = useMemo(() => demoWords.slice(0, visibleWords), [visibleWords]);
+  const isBlooming = phase === "bloom" || phase === "encapsulated";
+  const canGatherCapture = phase === "capture" && visibleWords >= Math.min(9, demoWords.length);
+
+  useEffect(() => {
+    if (phase !== "capture") {
+      return;
+    }
+
+    setVisibleWords(0);
+    let interval: number | null = null;
+    const revealDelay = prefersReducedMotion ? 120 : 1800;
+
+    const timeout = window.setTimeout(() => {
+      interval = window.setInterval(() => {
+        setVisibleWords((current) => {
+          if (current >= demoWords.length) {
+            if (interval) {
+              window.clearInterval(interval);
+            }
+
+            window.setTimeout(() => setPhase("bloom"), prefersReducedMotion ? 120 : 600);
+            return current;
+          }
+
+          return current + 1;
+        });
+      }, prefersReducedMotion ? 40 : 120);
+    }, revealDelay);
+
+    return () => {
+      window.clearTimeout(timeout);
+      if (interval) {
+        window.clearInterval(interval);
+      }
+    };
+  }, [phase, prefersReducedMotion]);
+
+  function skipToBloom() {
+    setVisibleWords((current) => Math.max(current, demoWords.length));
+    window.setTimeout(() => setPhase("bloom"), prefersReducedMotion ? 80 : 180);
+  }
+
+  function resetDemo() {
+    setSelectedCard(null);
+    setNote("");
+    setVisibleWords(0);
+    setPhase("ambient");
+  }
+
+  function startCapture() {
+    setSelectedCard(null);
+    setPhase("capture");
+  }
+
+  return (
+    <motion.div
+      className="glass-shell relative mx-auto h-[44rem] max-w-6xl overflow-hidden rounded-[2.5rem] bg-[rgba(255,255,255,0.42)] p-4 shadow-[0_36px_120px_rgba(120,134,158,0.16)] sm:h-[48rem] sm:p-6"
+      initial={{ opacity: 0, y: 32 }}
+      transition={softSpring}
+      viewport={{ amount: 0.18, once: true }}
       whileInView={{ opacity: 1, y: 0 }}
     >
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/20 opacity-0 transition group-hover:opacity-100" />
-      <p className="mb-5 text-[0.6rem] font-semibold uppercase tracking-[0.42em] text-[#888888]">
-        {label}
-      </p>
-      {children}
-    </motion.article>
+      <div className="absolute inset-0 rounded-[2.5rem] bg-[radial-gradient(circle_at_50%_20%,rgba(189,215,216,0.25),transparent_22rem),radial-gradient(circle_at_80%_70%,rgba(247,203,202,0.2),transparent_19rem)]" />
+
+      {isBlooming ? <DemoNav /> : null}
+
+      <div className="relative h-full">
+        <AnimatePresence mode="popLayout">
+          {phase === "ambient" || phase === "capture" ? (
+            <motion.div
+              animate={{ opacity: 1 }}
+              className="flex h-full flex-col items-center justify-center"
+              exit={{ opacity: 0, transition: { duration: 0.3 } }}
+              initial={{ opacity: 0 }}
+              key="capture"
+            >
+              <DemoOrb isCapturing={phase === "capture"} />
+              <motion.div
+                animate={{ maxWidth: phase === "capture" ? 720 : 580 }}
+                className="glass-shell mt-8 flex min-h-16 w-full items-center gap-3 rounded-[2rem] p-2 sm:rounded-full"
+                transition={softSpring}
+              >
+                {phase === "capture" ? <SmallAnchorOrb /> : null}
+                <div className="min-w-0 flex-1 px-3">
+                  {phase === "capture" ? (
+                    <div className="flex min-h-12 flex-wrap items-center gap-x-1.5 gap-y-1 text-left text-sm leading-6 text-[var(--text-primary)] sm:text-base">
+                      {visibleWords === 0 ? (
+                        <motion.span
+                          animate={{ opacity: [0.48, 0.76, 0.48] }}
+                          className="text-[var(--text-muted)]"
+                          transition={{ duration: 1.4, ease: "easeInOut", repeat: Infinity }}
+                        >
+                          listening...
+                        </motion.span>
+                      ) : null}
+                      <AnimatePresence initial={false}>
+                        {visibleText.map((word, index) => (
+                          <motion.span
+                            animate={{ opacity: 1, y: 0 }}
+                            className="inline-block"
+                            initial={{ opacity: 0, y: 4 }}
+                            key={`${word}-${index}`}
+                            transition={softSpring}
+                          >
+                            {word}
+                          </motion.span>
+                        ))}
+                      </AnimatePresence>
+                    </div>
+                  ) : (
+                    <span className="block px-2 text-left text-[var(--text-muted)]">
+                      what's on your mind?
+                    </span>
+                  )}
+                </div>
+                {phase === "capture" ? <Waveform /> : null}
+                <motion.button
+                  aria-label="try the demo"
+                  className="group relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[var(--blue-dusty)] text-[var(--bg-elevated)] shadow-[0_12px_30px_rgba(120,134,158,0.22)]"
+                  onClick={phase === "capture" ? skipToBloom : startCapture}
+                  type="button"
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.96 }}
+                >
+                  <MicIcon />
+                  <span className="pointer-events-none absolute -top-10 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-full bg-[var(--text-primary)] px-3 py-1 text-xs text-[var(--bg-base)] group-hover:block">
+                    click to try the demo
+                  </span>
+                </motion.button>
+              </motion.div>
+
+              <AnimatePresence>
+                {canGatherCapture ? (
+                  <motion.button
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-5 rounded-full border border-[rgba(153,167,183,0.28)] bg-[rgba(255,255,255,0.42)] px-5 py-3 text-sm lowercase text-[var(--blue-slate)] backdrop-blur-xl"
+                    exit={{ opacity: 0, y: 8 }}
+                    initial={{ opacity: 0, y: 8 }}
+                    onClick={skipToBloom}
+                    transition={softSpring}
+                    type="button"
+                  >
+                    tap to gather
+                  </motion.button>
+                ) : null}
+              </AnimatePresence>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        {isBlooming ? (
+          <BloomScene
+            note={note}
+            onEncapsulate={() => {
+              setSelectedCard(null);
+              setPhase("encapsulated");
+            }}
+            onNoteChange={setNote}
+            onReset={resetDemo}
+            phase={phase}
+            selectedCard={selectedCard}
+            setSelectedCard={setSelectedCard}
+          />
+        ) : null}
+      </div>
+    </motion.div>
+  );
+}
+
+function DemoOrb({ isCapturing }: { isCapturing: boolean }) {
+  const prefersReducedMotion = useReducedMotion();
+
+  return (
+    <motion.div
+      animate={
+        prefersReducedMotion
+          ? undefined
+          : {
+              rotate: [0, 8, -6, 0],
+              scale: isCapturing ? 0.15 : [1, 1.03, 1],
+              x: isCapturing ? -260 : 0,
+              y: isCapturing ? 118 : 0,
+            }
+      }
+      className="h-44 w-44 rounded-full bg-[radial-gradient(circle_at_35%_28%,rgba(255,255,255,0.62),transparent_22%),radial-gradient(circle_at_30%_75%,var(--blue-dusty),transparent_34%),radial-gradient(circle_at_70%_35%,var(--sage),transparent_35%),radial-gradient(circle_at_70%_72%,var(--coral-soft),transparent_30%)] shadow-[0_28px_80px_rgba(153,167,183,0.22)]"
+      transition={{ duration: 4, ease: "easeInOut", repeat: isCapturing ? 0 : Infinity }}
+    />
+  );
+}
+
+function SmallAnchorOrb() {
+  return (
+    <motion.div
+      animate={{ opacity: [0.45, 0.7, 0.45], scale: [1, 1.08, 1] }}
+      className="ml-2 h-8 w-8 shrink-0 rounded-full bg-[radial-gradient(circle_at_30%_30%,var(--bg-elevated),var(--sage),var(--blue-dusty))]"
+      transition={{ duration: 1.7, ease: "easeInOut", repeat: Infinity }}
+    />
+  );
+}
+
+function Waveform() {
+  const bars = [0.34, 0.62, 0.44, 0.78, 0.5, 0.92, 0.58, 0.72, 0.4, 0.66];
+
+  return (
+    <div className="hidden h-10 w-28 items-center justify-center gap-1 sm:flex">
+      {bars.map((bar, index) => (
+        <motion.span
+          animate={{ scaleY: [0.35, bar, 0.5, Math.max(0.3, bar - 0.18)] }}
+          className="h-8 w-1 rounded-full bg-[var(--blue-dusty)]"
+          key={`${bar}-${index}`}
+          style={{ transformOrigin: "center" }}
+          transition={{ delay: index * 0.05, duration: 0.8, repeat: Infinity, repeatType: "mirror" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DemoNav() {
+  return (
+    <motion.div
+      animate={{ opacity: 1, y: 0 }}
+      className="absolute left-1/2 top-6 z-20 flex -translate-x-1/2 rounded-full border border-[rgba(153,167,183,0.22)] bg-[rgba(255,255,255,0.48)] p-1 text-xs lowercase text-[var(--text-muted)] backdrop-blur-xl"
+      initial={{ opacity: 0, y: -10 }}
+      transition={softSpring}
+    >
+      {["timeline", "map", "categories"].map((item) => (
+        <span
+          className={`rounded-full px-4 py-2 ${item === "map" ? "bg-[var(--blue-dusty)] text-[var(--bg-elevated)]" : ""}`}
+          key={item}
+        >
+          {item}
+        </span>
+      ))}
+    </motion.div>
+  );
+}
+
+function BloomScene({
+  note,
+  onEncapsulate,
+  onNoteChange,
+  onReset,
+  phase,
+  selectedCard,
+  setSelectedCard,
+}: {
+  note: string;
+  onEncapsulate: () => void;
+  onNoteChange: (note: string) => void;
+  onReset: () => void;
+  phase: DemoPhase;
+  selectedCard: DemoCard | null;
+  setSelectedCard: (card: DemoCard | null) => void;
+}) {
+  const isEncapsulated = phase === "encapsulated";
+
+  return (
+    <motion.div
+      animate={{ opacity: 1 }}
+      className="absolute inset-0 pt-16"
+      initial={{ opacity: 0 }}
+      transition={softSpring}
+    >
+      <div className="absolute inset-0 origin-center scale-[0.58] sm:scale-[0.78] lg:scale-100">
+        <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="-360 -280 720 560">
+          {demoCards.slice(0, -1).map((card, index) => {
+            const nextCard = demoCards[index + 1];
+
+            return (
+              <motion.path
+                animate={{ opacity: isEncapsulated ? 0 : 0.4, pathLength: isEncapsulated ? 0 : 1 }}
+                d={`M ${card.x} ${card.y} C ${card.x * 0.45} ${card.y * 0.18}, ${
+                  nextCard.x * 0.45
+                } ${nextCard.y * 0.18}, ${nextCard.x} ${nextCard.y}`}
+                fill="none"
+                initial={{ opacity: 0, pathLength: 0 }}
+                key={`${card.id}-${nextCard.id}`}
+                stroke="var(--sage-deep)"
+                strokeLinecap="round"
+                strokeWidth="2"
+                transition={{ delay: 0.32 + index * 0.12, duration: 0.7 }}
+              />
+            );
+          })}
+        </svg>
+
+        <div className="absolute left-1/2 top-[42%] h-0 w-0">
+          {demoCards.map((card, index) => (
+            <DemoThoughtCard
+              card={card}
+              index={index}
+              isEncapsulated={isEncapsulated}
+              key={card.id}
+              onClick={() => !isEncapsulated && setSelectedCard(card)}
+            />
+          ))}
+        </div>
+
+        <StackDock isEncapsulated={isEncapsulated} />
+      </div>
+
+      <AnimatePresence>
+        {!isEncapsulated ? (
+          <motion.button
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute bottom-8 left-1/2 z-20 -translate-x-1/2 rounded-full bg-[var(--coral-soft)] px-7 py-4 text-sm font-semibold lowercase text-[var(--text-primary)] shadow-[0_18px_48px_rgba(232,180,176,0.24)]"
+            exit={{ opacity: 0, y: 10 }}
+            initial={{ opacity: 0, y: 10 }}
+            onClick={onEncapsulate}
+            transition={softSpring}
+            type="button"
+            whileHover={{ y: -2 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            gather
+          </motion.button>
+        ) : (
+          <motion.div
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute bottom-6 left-1/2 z-20 flex -translate-x-1/2 flex-col items-center gap-3"
+            initial={{ opacity: 0, y: 12 }}
+            transition={{ ...softSpring, delay: 0.7 }}
+          >
+            <p className="text-sm lowercase tracking-[0.12em] text-[var(--text-secondary)]">
+              gathered.
+            </p>
+            <button
+              className="text-sm lowercase text-[var(--blue-slate)] underline decoration-[rgba(120,134,158,0.28)] underline-offset-4"
+              onClick={onReset}
+              type="button"
+            >
+              try again
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <DetailPanel
+        card={selectedCard}
+        note={note}
+        onChangeNote={onNoteChange}
+        onClose={() => setSelectedCard(null)}
+      />
+    </motion.div>
+  );
+}
+
+function DemoThoughtCard({
+  card,
+  index,
+  isEncapsulated,
+  onClick,
+}: {
+  card: DemoCard;
+  index: number;
+  isEncapsulated: boolean;
+  onClick: () => void;
+}) {
+  const destination = stackPositions[card.stack];
+
+  return (
+    <motion.button
+      animate={{
+        filter: isEncapsulated ? "saturate(0.45)" : "saturate(1)",
+        opacity: 1,
+        scale: isEncapsulated ? 0.35 : 1,
+        x: isEncapsulated ? destination.x : card.x,
+        y: isEncapsulated ? destination.y : card.y,
+      }}
+      className="glass-card absolute flex h-24 w-44 items-center justify-center rounded-[1.4rem] px-5 text-center text-sm font-semibold leading-5 text-[var(--text-primary)]"
+      initial={{ opacity: 0, scale: 0.48, x: 0, y: 0 }}
+      onClick={onClick}
+      style={{ borderColor: card.tint, marginLeft: -88, marginTop: -48 }}
+      transition={{ ...(isEncapsulated ? landSpring : softSpring), delay: index * 0.1 }}
+      type="button"
+      whileHover={isEncapsulated ? undefined : { y: card.y - 4 }}
+    >
+      {card.label}
+    </motion.button>
+  );
+}
+
+function StackDock({ isEncapsulated }: { isEncapsulated: boolean }) {
+  return (
+    <div className="absolute bottom-20 left-1/2 h-24 w-[42rem] max-w-[calc(100%-2rem)] -translate-x-1/2">
+      {Object.entries(stackPositions).map(([stack, position], index) => {
+        const stackName = stack as StackId;
+        const cardsInStack = demoCards.filter((card) => card.stack === stackName);
+
+        return (
+          <motion.div
+            animate={
+              isEncapsulated
+                ? { opacity: 1, scale: [1, 1.02, 1], y: 0 }
+                : { opacity: 0.52, scale: 1, y: 0 }
+            }
+            className="absolute flex w-28 flex-col items-center"
+            initial={{ opacity: 0, y: 12 }}
+            key={stackName}
+            style={{
+              left: `calc(50% + ${position.x}px)`,
+              marginLeft: -56,
+              top: 0,
+            }}
+            transition={{
+              delay: isEncapsulated ? 0.44 + index * 0.12 : index * 0.08,
+              duration: isEncapsulated ? 5 : 0.45,
+              ease: "easeInOut",
+              repeat: isEncapsulated ? Infinity : 0,
+            }}
+          >
+            <motion.div
+              animate={isEncapsulated ? { scale: [1, 1.05, 1] } : undefined}
+              className="relative h-14 w-20"
+              transition={{ delay: 0.36 + index * 0.1, duration: 0.22 }}
+            >
+              {[0, 1, 2].map((layer) => (
+                <div
+                  className="absolute h-12 w-20 rounded-2xl border bg-[rgba(255,255,255,0.56)] shadow-[0_12px_28px_rgba(120,134,158,0.13)] backdrop-blur-xl"
+                  key={layer}
+                  style={{
+                    borderColor: stackTints[stackName],
+                    left: layer * 2,
+                    opacity: layer < cardsInStack.length || isEncapsulated ? 1 : 0.38,
+                    top: layer * 4,
+                  }}
+                />
+              ))}
+            </motion.div>
+            <span className="mt-4 text-[0.62rem] font-semibold lowercase tracking-[0.14em] text-[var(--text-secondary)]">
+              {stackName}
+            </span>
+          </motion.div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DetailPanel({
+  card,
+  note,
+  onChangeNote,
+  onClose,
+}: {
+  card: DemoCard | null;
+  note: string;
+  onChangeNote: (note: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <AnimatePresence>
+      {card ? (
+        <>
+          <motion.button
+            aria-label="close detail panel"
+            animate={{ opacity: 1 }}
+            className="absolute inset-0 z-20 bg-transparent"
+            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            onClick={onClose}
+            type="button"
+          />
+          <motion.aside
+            animate={{ opacity: 1, x: 0, y: 0 }}
+            className="glass-shell absolute bottom-0 right-0 z-30 flex h-[70%] w-full flex-col rounded-t-[2rem] p-6 sm:bottom-6 sm:right-6 sm:h-[calc(100%-6rem)] sm:w-[22rem] sm:rounded-[2rem]"
+            exit={{ opacity: 0, x: 40, y: 20 }}
+            initial={{ opacity: 0, x: 80, y: 20 }}
+            transition={softSpring}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold lowercase tracking-[0.18em] text-[var(--blue-slate)]">
+                  gathered node
+                </p>
+                <h3 className="mt-3 text-2xl font-serif leading-tight tracking-[-0.035em]">
+                  {card.label}
+                </h3>
+              </div>
+              <button className="text-sm text-[var(--text-muted)]" onClick={onClose} type="button">
+                close
+              </button>
+            </div>
+            <div className="mt-5 flex flex-wrap gap-2">
+              {card.tags.map((tag, index) => (
+                <span
+                  className="rounded-full px-3 py-1 text-xs lowercase text-[var(--text-primary)]"
+                  key={tag}
+                  style={{
+                    background:
+                      index % 3 === 0
+                        ? "var(--blue-mist)"
+                        : index % 3 === 1
+                          ? "var(--sage)"
+                          : "var(--coral-soft)",
+                  }}
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+            <label className="mt-7 text-sm lowercase text-[var(--text-secondary)]" htmlFor="demo-note">
+              add a note
+            </label>
+            <textarea
+              className="mt-3 min-h-32 resize-none rounded-3xl border border-[rgba(153,167,183,0.24)] bg-[rgba(255,255,255,0.52)] p-4 text-sm leading-6 outline-none placeholder:text-[var(--text-muted)]"
+              id="demo-note"
+              onChange={(event) => onChangeNote(event.target.value)}
+              placeholder="anything else to remember?"
+              value={note}
+            />
+          </motion.aside>
+        </>
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+function PillarsSection() {
+  const pillars: { name: StackId; copy: string }[] = [
+    { name: "Physical", copy: "errands, bodies, places, logistics" },
+    { name: "Emotional", copy: "people, care, feelings, repair" },
+    { name: "Mental", copy: "ideas, plans, research, decisions" },
+    { name: "Spiritual", copy: "meaning, values, patterns, direction" },
+  ];
+
+  return (
+    <section className="relative z-10 bg-[var(--bg-base)] px-5 py-24">
+      <div className="mx-auto max-w-6xl">
+        <motion.div
+          className="mx-auto max-w-3xl text-center"
+          initial="hidden"
+          variants={sectionVariants}
+          viewport={{ once: true }}
+          whileInView="show"
+        >
+          <p className="text-sm font-semibold lowercase tracking-[0.18em] text-[var(--blue-slate)]">
+            four soft homes
+          </p>
+          <h2 className="mt-4 font-serif text-4xl leading-tight tracking-[-0.05em] sm:text-6xl">
+            Everything you capture gets a home - automatically.
+          </h2>
+        </motion.div>
+
+        <div className="mt-14 grid gap-5 md:grid-cols-4">
+          {pillars.map((pillar, index) => (
+            <motion.div
+              className="glass-shell relative min-h-64 overflow-hidden rounded-[2rem] p-6"
+              initial={{ opacity: 0, y: 24 }}
+              key={pillar.name}
+              transition={{ ...softSpring, delay: index * 0.1 }}
+              viewport={{ once: true }}
+              whileInView={{ opacity: 1, y: 0 }}
+            >
+              <div className="relative h-24">
+                {[0, 1, 2].map((layer) => (
+                  <div
+                    className="absolute h-20 w-28 rounded-[1.4rem] border bg-[rgba(255,255,255,0.5)] shadow-[0_18px_44px_rgba(120,134,158,0.13)]"
+                    key={layer}
+                    style={{
+                      borderColor: stackTints[pillar.name],
+                      left: layer * 8,
+                      top: layer * 7,
+                    }}
+                  />
+                ))}
+              </div>
+              <h3 className="mt-8 font-serif text-3xl tracking-[-0.045em]">{pillar.name}</h3>
+              <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{pillar.copy}</p>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FinalWaitlistSection() {
+  const [email, setEmail] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [count, setCount] = useState(247);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setCount((current) => current + 1);
+    }, 9000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!email.trim()) {
+      return;
+    }
+
+    console.log("waitlist signup", email);
+    setSubmitted(true);
+  }
+
+  return (
+    <section className="relative z-10 bg-[var(--bg-deep)] px-5 py-28">
+      <motion.div
+        className="mx-auto flex max-w-3xl flex-col items-center text-center"
+        initial="hidden"
+        variants={sectionVariants}
+        viewport={{ once: true }}
+        whileInView="show"
+      >
+        <h2 className="font-serif text-5xl leading-tight tracking-[-0.055em] sm:text-7xl">
+          Be first to think out loud.
+        </h2>
+        <p className="mt-5 max-w-xl text-lg leading-8 text-[var(--text-secondary)]">
+          leave your email. we will hold the place softly.
+        </p>
+        <AnimatePresence mode="wait">
+          {submitted ? (
+            <motion.div
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="glass-shell mt-10 flex items-center gap-3 rounded-[1.4rem] px-6 py-5 text-left shadow-[0_24px_70px_rgba(120,134,158,0.16)]"
+              initial={{ opacity: 0, scale: 0.82, y: -24 }}
+              key="final-success"
+              transition={landSpring}
+            >
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--sage)] text-[var(--text-primary)]">
+                <CheckIcon />
+              </span>
+              <span className="text-sm lowercase text-[var(--text-secondary)]">
+                you're gathered into the waitlist.
+              </span>
+            </motion.div>
+          ) : (
+            <motion.form
+              className="glass-shell mt-10 flex w-full max-w-xl rounded-full p-1.5"
+              key="final-form"
+              onSubmit={onSubmit}
+            >
+              <input
+                className="min-w-0 flex-1 bg-transparent px-5 text-sm outline-none placeholder:text-[var(--text-muted)]"
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="email address"
+                type="email"
+                value={email}
+              />
+              <button
+                className="rounded-full bg-[var(--coral-soft)] px-6 py-4 text-sm font-semibold lowercase text-[var(--text-primary)] transition hover:bg-[var(--coral-deep)]"
+                type="submit"
+              >
+                join
+              </button>
+            </motion.form>
+          )}
+        </AnimatePresence>
+        <p className="mt-6 text-sm lowercase tracking-[0.08em] text-[var(--text-muted)]">
+          {count} people already waiting
+        </p>
+      </motion.div>
+    </section>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="relative z-10 border-t border-[rgba(153,167,183,0.18)] bg-[var(--bg-deep)] px-5 py-10">
+      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 text-center text-sm text-[var(--text-secondary)] sm:flex-row sm:text-left">
+        <p className="font-serif text-2xl tracking-[-0.05em] text-[var(--text-primary)]">Clutter</p>
+        <p>say what's on your mind. we'll hold onto it.</p>
+        <div className="flex gap-5 lowercase">
+          <a className="hover:text-[var(--blue-slate)]" href="mailto:hello@example.com">
+            contact
+          </a>
+          <a className="hover:text-[var(--blue-slate)]" href="#demo">
+            demo
+          </a>
+        </div>
+      </div>
+    </footer>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24">
+      <path
+        d="M12 4a3 3 0 0 0-3 3v5a3 3 0 1 0 6 0V7a3 3 0 0 0-3-3Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 16 16">
+      <path d="m3.5 8.2 2.7 2.6 6.3-6.5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+    </svg>
   );
 }

@@ -1,8 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  background: #000000;
-  color: #ffffff;
+  --bg-base: #faf6f0;
+  --bg-elevated: #ffffff;
+  --bg-deep: #f4e8d9;
+  --blue-dusty: #99a7b7;
+  --blue-slate: #78869e;
+  --blue-mist: #d5e5e5;
+  --sage: #bdd7d8;
+  --sage-deep: #8fa8a0;
+  --coral-soft: #f7cbca;
+  --coral-deep: #e8b4b0;
+  --text-primary: #5d6b6b;
+  --text-secondary: #717988;
+  --text-muted: #99a7b7;
+  --attention: #e8c9a8;
+  --border-iridescent: linear-gradient(
+    135deg,
+    rgba(153, 167, 183, 0.3),
+    rgba(247, 203, 202, 0.3),
+    rgba(189, 215, 216, 0.3)
+  );
+  background: var(--bg-base);
+  color: var(--text-primary);
 }
 
 * {
@@ -11,36 +31,65 @@
 
 html {
   min-height: 100%;
-  background: #000000;
+  scroll-behavior: smooth;
+  background: var(--bg-base);
 }
 
 body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.055), transparent 28rem),
-    #000000;
-  color: #ffffff;
+    radial-gradient(circle at 50% 0%, rgba(213, 229, 229, 0.42), transparent 30rem),
+    var(--bg-base);
+  color: var(--text-primary);
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Avenir, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
 }
 
 button,
-audio {
+input,
+textarea {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
 ::selection {
-  background: #ffffff;
-  color: #000000;
+  background: var(--coral-soft);
+  color: var(--text-primary);
 }
 
-audio::-webkit-media-controls-panel {
-  background-color: #111111;
+.font-serif {
+  font-family: Georgia, "Times New Roman", Times, serif;
 }
 
-audio::-webkit-media-controls-current-time-display,
-audio::-webkit-media-controls-time-remaining-display {
-  color: #ffffff;
+.glass-shell,
+.glass-card {
+  position: relative;
+  border: 1px solid transparent;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.42)) padding-box,
+    var(--border-iridescent) border-box;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.glass-card {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.7)) padding-box,
+    var(--border-iridescent) border-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
