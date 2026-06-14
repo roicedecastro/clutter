@@ -277,10 +277,10 @@ function ProblemSection() {
   ];
 
   return (
-    <section className="relative z-10">
+    <section className="relative z-10 snap-y snap-proximity">
       {statements.map((statement) => (
         <motion.div
-          className={`${statement.bg} flex min-h-[76vh] items-center justify-center px-5 py-20`}
+          className={`${statement.bg} flex min-h-[76vh] snap-start items-center justify-center px-5 py-20`}
           initial="hidden"
           key={statement.copy}
           variants={sectionVariants}
@@ -364,6 +364,7 @@ function ClutterDemo() {
 
   const visibleText = useMemo(() => demoWords.slice(0, visibleWords), [visibleWords]);
   const isBlooming = phase === "bloom" || phase === "encapsulated";
+  const canGatherCapture = phase === "capture" && visibleWords >= Math.min(9, demoWords.length);
 
   useEffect(() => {
     if (phase !== "capture") {
@@ -371,20 +372,38 @@ function ClutterDemo() {
     }
 
     setVisibleWords(0);
-    const interval = window.setInterval(() => {
-      setVisibleWords((current) => {
-        if (current >= demoWords.length) {
-          window.clearInterval(interval);
-          window.setTimeout(() => setPhase("bloom"), prefersReducedMotion ? 120 : 600);
-          return current;
-        }
+    let interval: number | null = null;
+    const revealDelay = prefersReducedMotion ? 120 : 1800;
 
-        return current + 1;
-      });
-    }, prefersReducedMotion ? 40 : 120);
+    const timeout = window.setTimeout(() => {
+      interval = window.setInterval(() => {
+        setVisibleWords((current) => {
+          if (current >= demoWords.length) {
+            if (interval) {
+              window.clearInterval(interval);
+            }
 
-    return () => window.clearInterval(interval);
+            window.setTimeout(() => setPhase("bloom"), prefersReducedMotion ? 120 : 600);
+            return current;
+          }
+
+          return current + 1;
+        });
+      }, prefersReducedMotion ? 40 : 120);
+    }, revealDelay);
+
+    return () => {
+      window.clearTimeout(timeout);
+      if (interval) {
+        window.clearInterval(interval);
+      }
+    };
   }, [phase, prefersReducedMotion]);
+
+  function skipToBloom() {
+    setVisibleWords((current) => Math.max(current, demoWords.length));
+    window.setTimeout(() => setPhase("bloom"), prefersReducedMotion ? 80 : 180);
+  }
 
   function resetDemo() {
     setSelectedCard(null);
@@ -400,7 +419,7 @@ function ClutterDemo() {
 
   return (
     <motion.div
-      className="glass-shell relative mx-auto h-[48rem] max-w-6xl overflow-hidden rounded-[2.5rem] bg-[rgba(255,255,255,0.42)] p-4 shadow-[0_36px_120px_rgba(120,134,158,0.16)] sm:p-6"
+      className="glass-shell relative mx-auto h-[44rem] max-w-6xl overflow-hidden rounded-[2.5rem] bg-[rgba(255,255,255,0.42)] p-4 shadow-[0_36px_120px_rgba(120,134,158,0.16)] sm:h-[48rem] sm:p-6"
       initial={{ opacity: 0, y: 32 }}
       transition={softSpring}
       viewport={{ amount: 0.18, once: true }}
@@ -423,13 +442,22 @@ function ClutterDemo() {
               <DemoOrb isCapturing={phase === "capture"} />
               <motion.div
                 animate={{ maxWidth: phase === "capture" ? 720 : 580 }}
-                className="glass-shell mt-8 flex min-h-16 w-full items-center gap-3 rounded-full p-2"
+                className="glass-shell mt-8 flex min-h-16 w-full items-center gap-3 rounded-[2rem] p-2 sm:rounded-full"
                 transition={softSpring}
               >
                 {phase === "capture" ? <SmallAnchorOrb /> : null}
                 <div className="min-w-0 flex-1 px-3">
                   {phase === "capture" ? (
                     <div className="flex min-h-12 flex-wrap items-center gap-x-1.5 gap-y-1 text-left text-sm leading-6 text-[var(--text-primary)] sm:text-base">
+                      {visibleWords === 0 ? (
+                        <motion.span
+                          animate={{ opacity: [0.48, 0.76, 0.48] }}
+                          className="text-[var(--text-muted)]"
+                          transition={{ duration: 1.4, ease: "easeInOut", repeat: Infinity }}
+                        >
+                          listening...
+                        </motion.span>
+                      ) : null}
                       <AnimatePresence initial={false}>
                         {visibleText.map((word, index) => (
                           <motion.span
@@ -454,7 +482,7 @@ function ClutterDemo() {
                 <motion.button
                   aria-label="try the demo"
                   className="group relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[var(--blue-dusty)] text-[var(--bg-elevated)] shadow-[0_12px_30px_rgba(120,134,158,0.22)]"
-                  onClick={phase === "capture" ? () => setPhase("bloom") : startCapture}
+                  onClick={phase === "capture" ? skipToBloom : startCapture}
                   type="button"
                   whileHover={{ scale: 1.04 }}
                   whileTap={{ scale: 0.96 }}
@@ -465,6 +493,22 @@ function ClutterDemo() {
                   </span>
                 </motion.button>
               </motion.div>
+
+              <AnimatePresence>
+                {canGatherCapture ? (
+                  <motion.button
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-5 rounded-full border border-[rgba(153,167,183,0.28)] bg-[rgba(255,255,255,0.42)] px-5 py-3 text-sm lowercase text-[var(--blue-slate)] backdrop-blur-xl"
+                    exit={{ opacity: 0, y: 8 }}
+                    initial={{ opacity: 0, y: 8 }}
+                    onClick={skipToBloom}
+                    transition={softSpring}
+                    type="button"
+                  >
+                    tap to gather
+                  </motion.button>
+                ) : null}
+              </AnimatePresence>
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -583,41 +627,43 @@ function BloomScene({
       initial={{ opacity: 0 }}
       transition={softSpring}
     >
-      <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="-360 -280 720 560">
-        {demoCards.slice(0, -1).map((card, index) => {
-          const nextCard = demoCards[index + 1];
+      <div className="absolute inset-0 origin-center scale-[0.58] sm:scale-[0.78] lg:scale-100">
+        <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="-360 -280 720 560">
+          {demoCards.slice(0, -1).map((card, index) => {
+            const nextCard = demoCards[index + 1];
 
-          return (
-            <motion.path
-              animate={{ opacity: isEncapsulated ? 0 : 0.4, pathLength: isEncapsulated ? 0 : 1 }}
-              d={`M ${card.x} ${card.y} C ${card.x * 0.45} ${card.y * 0.18}, ${
-                nextCard.x * 0.45
-              } ${nextCard.y * 0.18}, ${nextCard.x} ${nextCard.y}`}
-              fill="none"
-              initial={{ opacity: 0, pathLength: 0 }}
-              key={`${card.id}-${nextCard.id}`}
-              stroke="var(--sage-deep)"
-              strokeLinecap="round"
-              strokeWidth="2"
-              transition={{ delay: 0.32 + index * 0.12, duration: 0.7 }}
+            return (
+              <motion.path
+                animate={{ opacity: isEncapsulated ? 0 : 0.4, pathLength: isEncapsulated ? 0 : 1 }}
+                d={`M ${card.x} ${card.y} C ${card.x * 0.45} ${card.y * 0.18}, ${
+                  nextCard.x * 0.45
+                } ${nextCard.y * 0.18}, ${nextCard.x} ${nextCard.y}`}
+                fill="none"
+                initial={{ opacity: 0, pathLength: 0 }}
+                key={`${card.id}-${nextCard.id}`}
+                stroke="var(--sage-deep)"
+                strokeLinecap="round"
+                strokeWidth="2"
+                transition={{ delay: 0.32 + index * 0.12, duration: 0.7 }}
+              />
+            );
+          })}
+        </svg>
+
+        <div className="absolute left-1/2 top-[42%] h-0 w-0">
+          {demoCards.map((card, index) => (
+            <DemoThoughtCard
+              card={card}
+              index={index}
+              isEncapsulated={isEncapsulated}
+              key={card.id}
+              onClick={() => !isEncapsulated && setSelectedCard(card)}
             />
-          );
-        })}
-      </svg>
+          ))}
+        </div>
 
-      <div className="absolute left-1/2 top-[42%] h-0 w-0">
-        {demoCards.map((card, index) => (
-          <DemoThoughtCard
-            card={card}
-            index={index}
-            isEncapsulated={isEncapsulated}
-            key={card.id}
-            onClick={() => !isEncapsulated && setSelectedCard(card)}
-          />
-        ))}
+        <StackDock isEncapsulated={isEncapsulated} />
       </div>
-
-      <StackDock isEncapsulated={isEncapsulated} />
 
       <AnimatePresence>
         {!isEncapsulated ? (
